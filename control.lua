@@ -69,14 +69,14 @@ function handlePreUpgradeEntity(event)
   if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
   storage.marked_for_upgrade[event.entity.unit_number] = { position=event.entity.position }
 end
-script.on_event(defines.events.on_marked_for_upgrade, handlePreUpgradeEntity)
+script.on_event(defines.events.on_marked_for_upgrade, handlePreUpgradeEntity, EVENT_TYPE_FILTER)
 
 --Handle upgrade cancelled
 function handleUpgradeCancelled(event)
   if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
   storage.marked_for_upgrade[event.entity.unit_number] = nil
 end
-script.on_event(defines.events.on_cancelled_upgrade, handleUpgradeCancelled)
+script.on_event(defines.events.on_cancelled_upgrade, handleUpgradeCancelled, EVENT_TYPE_FILTER)
 
 
 ---Handle the removal of a port
@@ -142,12 +142,25 @@ function handleBlueprintSetup(event)
 
     local settings = Network.exportSettings(worldEntity)
     event.stack.set_blueprint_entity_tags(bpEntity.entity_number, settings)
+    event.stack.set_entity_filter(bpEntity.entity_number, worldEntity.name)
     ::continue::
   end
 end
 script.on_event(defines.events.on_player_setup_blueprint, handleBlueprintSetup)
 
 
+-- Handle settings paste
+function handleSettingsPaste(event)
+  if not Util.isOutput(event.source) then return end
+  local settings = Network.exportSettings(event.source)
+  if not settings then return end
+
+  local entity = event.destination
+  if not Util.isOutput(entity) then return end
+
+  Network.importSettings(entity, settings)
+end
+script.on_event(defines.events.on_entity_settings_pasted, handleSettingsPaste)
 
 -- Open output port GUI
 function handleLeftClick(event)

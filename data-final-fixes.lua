@@ -30,10 +30,14 @@ local BELT_TYPE_MAP = {
   ["turbo-underground-belt"] = "turbo"
 }
 
-function makePort(undergroundPrototype, direction)
+function getPortName(undergroundPrototype, direction)
+  return NAME_PREFIX..direction.."-"..undergroundPrototype.name
+end
+
+function makePort(undergroundPrototype, direction, allOutputNames)
   local entity = table.deepcopy(undergroundPrototype)
   entity.type = BASE_TYPE
-  entity.name = NAME_PREFIX..direction.."-"..undergroundPrototype.name
+  entity.name = getPortName(undergroundPrototype, direction)
   entity.minable.result = entity.name
   entity.fast_replaceable_group = BASE_TYPE
   if undergroundPrototype.next_upgrade then
@@ -127,6 +131,8 @@ function makePort(undergroundPrototype, direction)
     west = direction == 'output' and westSprite or eastSprite,
   }
 
+  entity.additional_pastable_entities = allOutputNames or {}
+
   local overlayEntity = {
     type = OVERLAY_TYPE,
     name = Util.getAnimEntityName(entity),
@@ -205,10 +211,18 @@ local leftClickEvent = {
 }
 data:extend{subgroup, leftClickEvent}
 
+local allOutputNames = {}
+
+for _, prototype in pairs(data.raw["underground-belt"]) do
+  if not IGNORED_PROTOTYPES[prototype.name] then
+    table.insert(allOutputNames, getPortName(prototype, 'output'))
+  end
+end
+
 for _, prototype in pairs(data.raw["underground-belt"]) do
   if not IGNORED_PROTOTYPES[prototype.name] then
     -- Make the input and output ports
     makePort(prototype, 'input')
-    makePort(prototype, 'output')
+    makePort(prototype, 'output', allOutputNames)
   end
 end
