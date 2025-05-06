@@ -33,6 +33,12 @@ function handleEntityCreated(event)
     upgradeEntity = nil
   end
 
+  if storage.marked_for_upgrade and storage.marked_for_upgrade[event.entity.unit_number] then
+    -- In-place upgrade
+    upgradeEntity = storage.marked_for_upgrade[event.entity.unit_number]
+    storage.marked_for_upgrade[event.entity.unit_number] = nil
+  end
+
   local entity = event.entity or event.destination
   if not Util.isPort(entity) then return end
   Network.addPort(entity, upgradeEntity)
@@ -58,6 +64,20 @@ end
 script.on_event(defines.events.on_pre_build, handlePreBuildEntity)
 
 
+--Handle preparing for upgrade
+function handlePreUpgradeEntity(event)
+  if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
+  storage.marked_for_upgrade[event.entity.unit_number] = { position=event.entity.position }
+end
+script.on_event(defines.events.on_marked_for_upgrade, handlePreUpgradeEntity)
+
+--Handle upgrade cancelled
+function handleUpgradeCancelled(event)
+  if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
+  storage.marked_for_upgrade[event.entity.unit_number] = nil
+end
+script.on_event(defines.events.on_cancelled_upgrade, handleUpgradeCancelled)
+
 
 ---Handle the removal of a port
 ---@param event EventData.on_entity_died|EventData.on_robot_mined_entity|EventData.on_player_mined_entity|EventData.script_raised_destroy
@@ -75,6 +95,10 @@ function handleEntityRemoved(event)
   --     end
   --   end
   -- end
+  if storage.marked_for_upgrade and storage.marked_for_upgrade[entity.unit_number] then
+    -- In-place upgrade
+    UPGRADE_PORT_DATA = storage.marked_for_upgrade[entity.unit_number]
+  end
   if UPGRADE_PORT_DATA and Util.positionsEqual(UPGRADE_PORT_DATA.position, entity.position) then
     -- Upgrade this port in-place, so save some data_ModSetting for use in handleEntityCreated
     UPGRADE_PORT_DATA.name = entity.name

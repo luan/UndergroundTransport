@@ -317,6 +317,7 @@ function Network.addPort(entity, priorEntity)
     -- For in-place upgrade, preserve the prior port's settings and buffers but replace the port entity
     port.entity = entity
     priorGroup[priorEntity.unit_number] = nil
+    AnimationTracker.teardown(priorEntity)
   else
     -- For new ports, create an empty model
     port = {
