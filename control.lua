@@ -5,14 +5,7 @@ Network = require("scripts/network")
 GUI = require("scripts/gui")
 UndoTracker = require("scripts/undo_tracker")
 
--- Event filter for entity events
-EVENT_TYPE_FILTER = {
-  {filter = "type", type = "linked-belt"},
-  {filter = "type", type = "entity-ghost"},
-}
-
--- Left click event name
-LEFT_CLICK_EVENT = 'ut-left-click'
+require("scripts/constants")
 
 script.on_init(Network.init)
 script.on_event(defines.events.on_tick, function ()
@@ -21,31 +14,52 @@ script.on_event(defines.events.on_tick, function ()
   UndoTracker.tick()
 end)
 
-local UPGRADE_PORT_DATA = nil
+local PRE_BUILD_ENTITY = nil
+
+function markForUpgrade(entity, settings)
+  if not storage.markedForUpgrade then storage.markedForUpgrade = {} end
+  storage.markedForUpgrade[entity.unit_number] = { position=entity.position, settings=settings }
+end
+
+function peekUpgradeEntity(unitNumber)
+  if not storage.markedForUpgrade then storage.markedForUpgrade = {} end
+  return storage.markedForUpgrade[unitNumber]
+end
+
+function popUpgradeEntity(unitNumber)
+  if not storage.markedForUpgrade then storage.markedForUpgrade = {} end
+  local upgradeEntity = storage.markedForUpgrade[unitNumber]
+  storage.markedForUpgrade[unitNumber] = nil
+  return upgradeEntity
+end
 
 ---Handles creation of a port
 ---@param event EventData.on_built_entity|EventData.on_robot_built_entity|EventData.on_entity_cloned|EventData.script_raised_built|EventData.script_raised_revive
 function handleEntityCreated(event)
-  local upgradeEntity = UPGRADE_PORT_DATA
-  UPGRADE_PORT_DATA = nil
-  if upgradeEntity and not upgradeEntity.name then
-    -- Not an in-place upgrade
-    upgradeEntity = nil
+  if Util.isGhost(event.entity) then
+    local settings = Network.tryGetCombinatorSettings(event.entity)
+    if settings then
+      local entities = event.entity.surface.find_entities_filtered({position=event.entity.position, radius=0, type="entity-ghost"})
+      for _, entity in pairs(entities) do
+        if Util.isPort(entity) then
+          entity.tags = settings
+        end
+      end
+    end
   end
 
-  if storage.marked_for_upgrade and storage.marked_for_upgrade[event.entity.unit_number] then
-    -- In-place upgrade
-    upgradeEntity = storage.marked_for_upgrade[event.entity.unit_number]
-    storage.marked_for_upgrade[event.entity.unit_number] = nil
+  local upgradeEntity = popUpgradeEntity(event.entity.unit_number)
+  if not upgradeEntity and PRE_BUILD_ENTITY and Util.positionsEqual(PRE_BUILD_ENTITY.position, event.entity.position) and PRE_BUILD_ENTITY.name then
+    upgradeEntity = PRE_BUILD_ENTITY
+    PRE_BUILD_ENTITY = nil
   end
-
   local entity = event.entity or event.destination
   if not Util.isPort(entity) then return end
   Network.addPort(entity, upgradeEntity)
 
-  local settings = event.tags or (event.stack and event.stack.tags)-- or priorSettings
-  if settings then
-    Network.importSettings(entity, settings)
+  local settings = (upgradeEntity and upgradeEntity.settings) or event.tags or (event.stack and event.stack.tags)
+  if settings and next(settings) ~= nil then
+    Network.configurePort(entity, settings[MOD_DATA_LEFT_LANE], settings[MOD_DATA_RIGHT_LANE])
   end
 end
 script.on_event(defines.events.on_entity_cloned, handleEntityCreated, EVENT_TYPE_FILTER)
@@ -55,64 +69,52 @@ script.on_event(defines.events.script_raised_built, handleEntityCreated, EVENT_T
 script.on_event(defines.events.script_raised_revive, handleEntityCreated, EVENT_TYPE_FILTER)
 script.on_event(defines.events.on_space_platform_built_entity, handleEntityCreated, EVENT_TYPE_FILTER)
 
-
+-- Handle changes to the logistic slot of a combinator
+function handleEntityLogisticSlotChanged(event)
+  log("Logistic slot changed: "..event.entity.name)
+end
+script.on_event(defines.events.on_entity_logistic_slot_changed, handleEntityLogisticSlotChanged)
 
 -- Record settings from an existing port at the new build locaation so we can transfer them to the new port
 function handlePreBuildEntity(event)
-  UPGRADE_PORT_DATA = { position=event.position }
+  PRE_BUILD_ENTITY = {position=event.position}
 end
 script.on_event(defines.events.on_pre_build, handlePreBuildEntity)
 
 
 --Handle preparing for upgrade
 function handlePreUpgradeEntity(event)
-  if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
-  storage.marked_for_upgrade[event.entity.unit_number] = { position=event.entity.position }
+  markForUpgrade(event.entity)
 end
 script.on_event(defines.events.on_marked_for_upgrade, handlePreUpgradeEntity, EVENT_TYPE_FILTER)
 
 --Handle upgrade cancelled
 function handleUpgradeCancelled(event)
-  if not storage.marked_for_upgrade then storage.marked_for_upgrade = {} end
-  storage.marked_for_upgrade[event.entity.unit_number] = nil
+  popUpgradeEntity(event.entity.unit_number)
 end
 script.on_event(defines.events.on_cancelled_upgrade, handleUpgradeCancelled, EVENT_TYPE_FILTER)
 
 
 ---Handle the removal of a port
----@param event EventData.on_entity_died|EventData.on_robot_mined_entity|EventData.on_player_mined_entity|EventData.script_raised_destroy
+---@param event EventData.on_entity_died|EventData.on_robot_mined_entity|EventData.on_player_mined_entity|EventData.script_rad_destroy
 function handleEntityRemoved(event)
   local entity = event.entity
   if not Util.isPort(entity) then return end
 
-  -- This copies this port's settings to the created item, not sure that's helpful though...
-  -- local settings = Network.exportSettings(entity)
-  -- for idx = 1, #event.buffer do
-  --   local item = event.buffer[idx]
-  --   if item.name == entity.name then
-  --     for tag, value in pairs(settings) do
-  --       item.set_tag(tag, value)
-  --     end
-  --   end
-  -- end
-  if storage.marked_for_upgrade and storage.marked_for_upgrade[entity.unit_number] then
-    -- In-place upgrade
-    UPGRADE_PORT_DATA = storage.marked_for_upgrade[entity.unit_number]
-  end
-  if UPGRADE_PORT_DATA and Util.positionsEqual(UPGRADE_PORT_DATA.position, entity.position) then
+  local upgradeEntity = PRE_BUILD_ENTITY or peekUpgradeEntity(entity.unit_number)
+  if upgradeEntity and Util.positionsEqual(upgradeEntity.position, entity.position) then
     -- Upgrade this port in-place, so save some data_ModSetting for use in handleEntityCreated
-    UPGRADE_PORT_DATA.name = entity.name
-    UPGRADE_PORT_DATA.type = entity.type
-    UPGRADE_PORT_DATA.unit_number = entity.unit_number
-    UPGRADE_PORT_DATA.surface = entity.surface
-    UPGRADE_PORT_DATA.tags = entity.tags
-  else
-    -- Remove the port entirely
-    local tags = Network.exportSettings(entity)
-    if next(tags, nil) then
-      -- If the port has any settings, save them for the undo record next tick
-      UndoTracker.recordPortRemoved(entity, tags)
+    local port = Network.getPort(entity)
+    if PRE_BUILD_ENTITY then
+      PRE_BUILD_ENTITY.name = entity.name
+      PRE_BUILD_ENTITY.type = entity.type
+      PRE_BUILD_ENTITY.unit_number = entity.unit_number
+      PRE_BUILD_ENTITY.surface = entity.surface
+      PRE_BUILD_ENTITY.settings = entity.tags or Network.getSettings(port) or port.tags
+    else
+      markForUpgrade(entity, entity.tags or Network.getSettings(port) or port.tags)
     end
+  else
     Network.removePort(entity, event.buffer)
   end
   AnimationTracker.teardown(entity)
@@ -139,25 +141,34 @@ function handleBlueprintSetup(event)
 
     local worldEntity = mapping[bpEntity.entity_number]
     if not worldEntity then goto continue end
+    local port = Network.getPort(worldEntity)
+    if not port then goto continue end
 
-    local settings = Network.exportSettings(worldEntity)
-    event.stack.set_blueprint_entity_tags(bpEntity.entity_number, settings)
-    event.stack.set_entity_filter(bpEntity.entity_number, worldEntity.name)
+    -- local settings = Network.getSettings(port)
+    -- event.stack.set_blueprint_entity_tags(bpEntity.entity_number, settings)
+    -- event.stack.set_entity_filter(bpEntity.entity_number, worldEntity.name)
     ::continue::
   end
 end
 script.on_event(defines.events.on_player_setup_blueprint, handleBlueprintSetup)
 
 
+-- function handleBluePrintConfigure(event)
+--   log("Blueprint configured: "..event.entity.name)
+-- end
+-- script.on_event(defines.events.on_built_entity, handleBluePrintConfigure)
+
+
 -- Handle settings paste
 function handleSettingsPaste(event)
   if not Util.isOutput(event.source) then return end
-  local settings = Network.exportSettings(event.source)
+  local sourcePort = Network.getPort(event.source)
+  if not sourcePort then return end
+  local settings = Network.getSettings(sourcePort)
   if not settings then return end
 
   local entity = event.destination
   if not Util.isOutput(entity) then return end
-
   Network.importSettings(entity, settings)
 end
 script.on_event(defines.events.on_entity_settings_pasted, handleSettingsPaste)

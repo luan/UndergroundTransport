@@ -1,3 +1,5 @@
+local defaultMask = require("__core__.lualib.collision-mask-defaults")
+
 Util = require("scripts/util")
 
 local TINT = {0.65, 0.65, 0.65} -- to recolor the items and entities
@@ -44,6 +46,7 @@ function makePort(undergroundPrototype, direction, allOutputNames)
     entity.next_upgrade = NAME_PREFIX..direction.."-"..undergroundPrototype.next_upgrade
   end
   entity.localised_name = {"entity-name."..entity.name}
+  entity.selection_priority = 100
   for key in pairs(entity.structure) do -- should maybe be a bit more general to deal with differently defined sprites
     entity.structure[key] = EMPTY_SPRITE4WAY
   end
@@ -210,6 +213,27 @@ local leftClickEvent = {
   key_sequence = "mouse-button-1",
 }
 data:extend{subgroup, leftClickEvent}
+
+local combinatorEntity = table.deepcopy(data.raw["constant-combinator"]["constant-combinator"])
+combinatorEntity.name = COMBINATOR_TYPE
+combinatorEntity.localised_name = {"entity-name."..combinatorEntity.name}
+combinatorEntity.selectable_in_game = false
+combinatorEntity.minable = nil
+combinatorEntity.hidden = true
+combinatorEntity.hidden_in_factoriopedia = true
+combinatorEntity.placeable_by = {
+  item = "constant-combinator",
+  count = 0
+}
+combinatorEntity.sprites = nil
+combinatorEntity.collision_mask = {
+  layers = {},
+  colliding_with_tiles_only = true,
+  consider_tile_transitions = false,
+  not_colliding_with_itself = true,
+}
+combinatorEntity.fast_replaceable_group = BASE_TYPE
+data:extend{combinatorEntity}
 
 local allOutputNames = {}
 

@@ -4,9 +4,11 @@ MOD_DATA_LEFT_LANE = MOD_DATA_KEY..'left'
 MOD_DATA_RIGHT_LANE = MOD_DATA_KEY..'right'
 BASE_TYPE = "linked-belt"
 OVERLAY_TYPE = "electric-energy-interface"
+COMBINATOR_TYPE = "underground-transport-output-combinator"
 OVERLAY_SUFFIX = "-overlay"
 EVENT_TYPE_FILTER = {
   {filter = "type", type = BASE_TYPE},
   {filter = "type", type = "entity-ghost"},
+  {filter = "type", type = COMBINATOR_TYPE},
 }
 LEFT_CLICK_EVENT = 'ut-left-click'

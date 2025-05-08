@@ -120,6 +120,9 @@ function Network.tick()
           demands.lastIndex = 1
         end
         local outputEntry = demands[demands.lastIndex]
+        if not outputEntry or not outputEntry.port or not outputEntry.port.entity or not outputEntry.port.entity.valid then
+          goto continue
+        end
         local manhattanDistance = Util.manhattanDistance(inputEntry.port.entity.position, outputEntry.port.entity.position)
 
         -- Advance to the next output
@@ -145,11 +148,15 @@ function Network.tick()
           if not lastSupplyIdx then break end -- No more available
         end
       end
+        ::continue::
     end
 
     -- Push items into outputs from their buffers
     for _, output in pairs(network.outputs) do
       for idx = 1, 2 do
+        if not output.entity or not output.entity.valid then
+          goto continue
+        end
         local lane = output.entity.get_transport_line(idx)
         if lane.can_insert_at_back() then
           local portLane = Network.getPortLane(output, idx)
@@ -160,6 +167,7 @@ function Network.tick()
           end
         end
       end
+      ::continue::
     end
   end
 end
@@ -185,8 +193,8 @@ function Network.getPort(entity)
     return {
       entity=entity,
       itemCounts={},
-      leftLane={item=tags[MOD_DATA_LEFT_LANE]},
-      rightLane={item=tags[MOD_DATA_RIGHT_LANE]},
+      leftLane={},
+      rightLane={},
     }
   end
   return Network.getPortGroup(entity)[entity.unit_number]
@@ -315,21 +323,35 @@ function Network.addPort(entity, priorEntity)
   local port = priorGroup and priorGroup[priorEntity.unit_number]
   if upgradeInPlace and isSameDirection and port then
     -- For in-place upgrade, preserve the prior port's settings and buffers but replace the port entity
+    local combinator = entity.surface.create_entity{
+      name = COMBINATOR_TYPE,
+      position = entity.position,
+      force = entity.force,
+      create_build_effect_smoke = false,
+      raise_built = false
+    }
     port.entity = entity
+    port.combinator = combinator
     priorGroup[priorEntity.unit_number] = nil
     AnimationTracker.teardown(priorEntity)
   else
+    local combinator = entity.surface.find_entity(COMBINATOR_TYPE, entity.position) or entity.surface.create_entity{
+      name = COMBINATOR_TYPE,
+      position = entity.position,
+      force = entity.force,
+      create_build_effect_smoke = false,
+      raise_built = false
+    }
     -- For new ports, create an empty model
     port = {
       entity = entity,
+      combinator = combinator,
       itemCounts = {},
       leftLane = {
-        item = nil,
         buffer = {},
         bufferLength = MIN_BUFFER_LENGTH,
       },
       rightLane = {
-        item = nil,
         buffer = {},
         bufferLength = MIN_BUFFER_LENGTH,
       },
@@ -346,22 +368,92 @@ function Network.addPort(entity, priorEntity)
   end
   AnimationTracker.setup(entity)
 
-  log("Added: "..entity.name..", "..entity.surface.name)
+  log("Added port: " .. entity.name .. " with unit_number " .. entity.unit_number .. " on surface " .. entity.surface.name)
+end
+
+-- Helper function to set combinator signals based on item settings
+---@param port table
+---@param settings {left=table, right=table}
+function Network.setSettings(port, settings)
+  if not port.combinator or not port.combinator.valid then return end
+  local control = port.combinator.get_or_create_control_behavior()
+  if control then
+    local section = control.get_section(1) or control.add_section()
+    if settings[MOD_DATA_LEFT_LANE] and settings[MOD_DATA_LEFT_LANE].name then
+      section.set_slot(1, {
+        value = {
+          type = "item",
+          name = settings[MOD_DATA_LEFT_LANE].name,
+          quality = settings[MOD_DATA_LEFT_LANE].quality or "normal"
+        },
+        min = 1
+      })
+    else
+      section.clear_slot(1)
+    end
+    if settings[MOD_DATA_RIGHT_LANE] and settings[MOD_DATA_RIGHT_LANE].name then
+      section.set_slot(2, {
+        value = {
+          type = "item",
+          name = settings[MOD_DATA_RIGHT_LANE].name,
+          quality = settings[MOD_DATA_RIGHT_LANE].quality or "normal"
+        },
+        min = 1
+      })
+    else
+      section.clear_slot(2)
+    end
+  end
+end
+
+function Network.getSettings(port)
+  if Util.isGhost(port.entity) then
+    return port.entity.tags or {}
+  end
+
+  if not port.combinator or not port.combinator.valid then return end
+  local control = port.combinator.get_or_create_control_behavior()
+  if not control then return end
+  local section = control.get_section(1)
+  if not section then return end
+  local leftSlot = section.get_slot(1)
+  local rightSlot = section.get_slot(2)
+  return {
+    [MOD_DATA_LEFT_LANE] = leftSlot and leftSlot.value,
+    [MOD_DATA_RIGHT_LANE] = rightSlot and rightSlot.value
+  }
+end
+
+function Network.tryGetCombinatorSettings(entity)
+  if not entity or not entity.valid then return end
+  local control = entity.get_or_create_control_behavior()
+  if not control then return end
+  local section = control.get_section(1)
+  if not section then return end
+  local leftSlot = section.get_slot(1)
+  local rightSlot = section.get_slot(2)
+  return {
+    [MOD_DATA_LEFT_LANE] = leftSlot and leftSlot.value,
+    [MOD_DATA_RIGHT_LANE] = rightSlot and rightSlot.value
+  }
 end
 
 function Network.configurePort(entity, leftLane, rightLane)
   if not entity or not entity.valid then return end
+  entity.tags = createSettings(leftLane, rightLane)
 
-  if Util.isGhost(entity) then
-    entity.tags = createSettings(leftLane, rightLane)
-  else
-  local network = Network.get(entity.surface.name)
-  local port = Network.getPort(entity)
+  if not Util.isGhost(entity) then
+    local network = Network.get(entity.surface.name)
+    local port = Network.getPort(entity)
+    port.tags = createSettings(leftLane, rightLane)
 
-  Network.updateDemands(network, port, 1, leftLane)
-  Network.updateDemands(network, port, 2, rightLane)
-  port.leftLane.item = leftLane
-  port.rightLane.item = rightLane
+    Network.updateDemands(network, port, 1, leftLane)
+    Network.updateDemands(network, port, 2, rightLane)
+    
+    -- Update combinator signals
+    if port.combinator and port.combinator.valid then
+      Network.setSettings(port, { [MOD_DATA_LEFT_LANE] = leftLane, [MOD_DATA_RIGHT_LANE] = rightLane })
+    end
   end
 end
 
@@ -375,6 +467,12 @@ function Network.removePort(entity, spillInventory)
 
   Network.updateDemands(network, port, 1, nil)
   Network.updateDemands(network, port, 2, nil)
+  
+  -- Destroy combinator when removing port
+  if port.combinator and port.combinator.valid then
+    port.combinator.destroy()
+  end
+  
   portGroup[entity.unit_number] = nil
 
   function spill(lane)
@@ -399,16 +497,6 @@ function Network.removePort(entity, spillInventory)
   log("Removed: "..entity.name..", "..entity.surface.name)
 end
 
--- Returns configuration settings for the given entity in a tags-compatible table
-function Network.exportSettings(entity)
-  if Util.isGhost(entity) then
-    return entity.tags or {}
-  else
-    local port = Network.getPort(entity)
-    return createSettings(port.leftLane.item, port.rightLane.item)
-  end
-end
-
 function createSettings(leftItem, rightItem)
   return {
     [MOD_DATA_LEFT_LANE] = leftItem,
@@ -421,7 +509,10 @@ function Network.importSettings(entity, tags)
   if Util.isGhost(entity) then
     entity.tags = tags
   else
-  Network.configurePort(entity, tags[MOD_DATA_LEFT_LANE], tags[MOD_DATA_RIGHT_LANE])
+    local leftItem = tags[MOD_DATA_LEFT_LANE]
+    local rightItem = tags[MOD_DATA_RIGHT_LANE]
+    
+    Network.configurePort(entity, leftItem, rightItem)
   end
 end
 
