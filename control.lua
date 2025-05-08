@@ -35,7 +35,7 @@ function popUpgradeEntity(position)
   if entity then
     storage.markedForUpgrade[key] = nil
   end
-  return entity
+  return entity and entity.name ~= nil and entity or nil
 end
 
 ---Handles creation of a port
