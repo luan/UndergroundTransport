@@ -25,6 +25,13 @@ function GUI.openOutputPortGui(player, entity)
     inventoryButtons = {},
     dirty = false, -- Set true if a change is made
   }
+  
+  -- Check if port is valid, if not close the window and return
+  if not data.port then
+    window.destroy()
+    return
+  end
+  
   if not storage.guiData then
     storage.guiData = {}
   end
@@ -68,14 +75,16 @@ function GUI.openOutputPortGui(player, entity)
   buttonContainer.style.horizontal_spacing = 10
   buttonContainer.style.column_alignments[1] = 'right'
 
+  local settings = Network.getSettings(data.port)
+
   buttonContainer.add{ type="label", caption={'ui.ut-left-lane'}, style="semibold_label" }
   data.chooseLeftButton = buttonContainer.add{ type="choose-elem-button", elem_type='item-with-quality' }
-  data.chooseLeftButton.elem_value = data.port.leftLane.item
+  data.chooseLeftButton.elem_value = settings[MOD_DATA_LEFT_LANE]
   data.bothButtonLeft = buttonContainer.add{ type="button", caption={'ui.ut-both-lanes'} }
 
   buttonContainer.add{ type="label", caption={'ui.ut-right-lane'}, style="semibold_label" }
   data.chooseRightButton = buttonContainer.add{ type="choose-elem-button", elem_type='item-with-quality' }
-  data.chooseRightButton.elem_value = data.port.rightLane.item
+  data.chooseRightButton.elem_value = settings[MOD_DATA_RIGHT_LANE]
   data.bothButtonRight = buttonContainer.add{ type="button", caption={'ui.ut-both-lanes'} }
 
   bodyFrame.add{ type="label", caption={'ui.ut-inventory-header'} }
@@ -113,6 +122,7 @@ function GUI.checkClose(entity)
 end
 
 function GUI.updateButtonStates(data)
+  if not data or not data.bothButtonLeft or not data.chooseLeftButton or not data.bothButtonRight or not data.chooseRightButton then return end
   data.bothButtonLeft.enabled = not not data.chooseLeftButton.elem_value
   data.bothButtonRight.enabled = not not data.chooseRightButton.elem_value
   data.dirty = true
@@ -123,12 +133,15 @@ function GUI.updateInventory()
   if not storage.guiData then return end
 
   for playerIndex, data in pairs(storage.guiData) do
-    if not data.outputPortWindow.valid or not data.entity.valid then
+    if not data or not data.outputPortWindow or not data.outputPortWindow.valid or not data.entity or not data.entity.valid then
       -- Cleanup bogus state if the window was closed externally
       GUI.closeOutputPortGui{player_index=playerIndex}
       return
     end
+    
+    if not data.port then return end
     local itemToCount = Network.getItemCounts(data.port)
+    if not itemToCount then return end
 
     -- Add new buttons as needed
     for itemKey, count in pairs(itemToCount) do
@@ -154,7 +167,7 @@ end
 function handleClick(event)
   if not storage.guiData then return end
   local data = storage.guiData[event.player_index]
-  if not data then return end
+  if not data or not data.port then return end
 
   if event.element == data.closeButton then
     GUI.closeOutputPortGui(event)
@@ -172,8 +185,10 @@ function handleClick(event)
     if not inventory then return end
     
     function insertFrom(lane)
+      if not lane or not lane.buffer then return end
       for i = #lane.buffer, 1, -1 do
         local entry = lane.buffer[i]
+        if not entry or not entry.inventory or not entry.inventory[1] then goto continue end
         local item = entry.inventory[1]
         local key = Util.itemFilterToKey(item)
         if key == itemKey then
@@ -181,6 +196,7 @@ function handleClick(event)
           inventory.insert(item)
           Network.removeItem(data.port, lane, i)
         end
+        ::continue::
       end
     end
     insertFrom(data.port.leftLane)

@@ -1,3 +1,5 @@
+local defaultMask = require("__core__.lualib.collision-mask-defaults")
+
 Util = require("scripts/util")
 
 local TINT = {0.65, 0.65, 0.65} -- to recolor the items and entities
@@ -30,16 +32,21 @@ local BELT_TYPE_MAP = {
   ["turbo-underground-belt"] = "turbo"
 }
 
-function makePort(undergroundPrototype, direction)
+function getPortName(undergroundPrototype, direction)
+  return NAME_PREFIX..direction.."-"..undergroundPrototype.name
+end
+
+function makePort(undergroundPrototype, direction, allOutputNames)
   local entity = table.deepcopy(undergroundPrototype)
   entity.type = BASE_TYPE
-  entity.name = NAME_PREFIX..direction.."-"..undergroundPrototype.name
+  entity.name = getPortName(undergroundPrototype, direction)
   entity.minable.result = entity.name
   entity.fast_replaceable_group = BASE_TYPE
   if undergroundPrototype.next_upgrade then
     entity.next_upgrade = NAME_PREFIX..direction.."-"..undergroundPrototype.next_upgrade
   end
   entity.localised_name = {"entity-name."..entity.name}
+  entity.selection_priority = 100
   for key in pairs(entity.structure) do -- should maybe be a bit more general to deal with differently defined sprites
     entity.structure[key] = EMPTY_SPRITE4WAY
   end
@@ -127,6 +134,8 @@ function makePort(undergroundPrototype, direction)
     west = direction == 'output' and westSprite or eastSprite,
   }
 
+  entity.additional_pastable_entities = allOutputNames or {}
+
   local overlayEntity = {
     type = OVERLAY_TYPE,
     name = Util.getAnimEntityName(entity),
@@ -205,10 +214,39 @@ local leftClickEvent = {
 }
 data:extend{subgroup, leftClickEvent}
 
+local combinatorEntity = table.deepcopy(data.raw["constant-combinator"]["constant-combinator"])
+combinatorEntity.name = COMBINATOR_TYPE
+combinatorEntity.localised_name = {"entity-name."..combinatorEntity.name}
+combinatorEntity.selectable_in_game = false
+combinatorEntity.minable = nil
+combinatorEntity.hidden = true
+combinatorEntity.hidden_in_factoriopedia = true
+combinatorEntity.placeable_by = {
+  item = "constant-combinator",
+  count = 0
+}
+combinatorEntity.sprites = nil
+combinatorEntity.collision_mask = {
+  layers = {},
+  colliding_with_tiles_only = true,
+  consider_tile_transitions = false,
+  not_colliding_with_itself = true,
+}
+combinatorEntity.fast_replaceable_group = BASE_TYPE
+data:extend{combinatorEntity}
+
+local allOutputNames = {}
+
+for _, prototype in pairs(data.raw["underground-belt"]) do
+  if not IGNORED_PROTOTYPES[prototype.name] then
+    table.insert(allOutputNames, getPortName(prototype, 'output'))
+  end
+end
+
 for _, prototype in pairs(data.raw["underground-belt"]) do
   if not IGNORED_PROTOTYPES[prototype.name] then
     -- Make the input and output ports
     makePort(prototype, 'input')
-    makePort(prototype, 'output')
+    makePort(prototype, 'output', allOutputNames)
   end
 end

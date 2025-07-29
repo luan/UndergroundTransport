@@ -32,14 +32,26 @@ local MIN_BUFFER_LENGTH = 6 * 4 -- 6 tiles
 local BUFFER_LENGTH_RECALC_TICKS = 30 * 60 -- 30 seconds in ticks
 local INSERTER_SCAN_RADIUS = 3
 
+-- Helper functions for lane operations
+function Network.forEachLane(port, callback)
+  callback(port.leftLane, 1)
+  callback(port.rightLane, 2)
+end
+
+function Network.getPortLane(port, lane)
+  if lane == 1 then return port.leftLane
+  elseif lane == 2 then return port.rightLane end
+  return nil
+end
+
 function Network.init()
   if not storage.networks then
     storage.networks = {}
   end
 end
 
-function trackInput(network, supplies, port, item, laneIndex, inserter)
-  -- We have an iteam ready, now check if any outputs want it
+local function trackInput(network, supplies, port, item, laneIndex, inserter)
+  -- We have an item ready, now check if any outputs want it
   local itemKey = Util.itemFilterToKey(item)
   local demands = network.demands[itemKey]
   if not demands or #demands == 0 then return end
@@ -53,74 +65,81 @@ function trackInput(network, supplies, port, item, laneIndex, inserter)
   table.insert(inputs, { port=port, lane=laneIndex, inserter=inserter })
 end
 
-function Network.tick()
-  local recalcBufferLenghts = not storage.nextRecalcTick or game.tick >= storage.nextRecalcTick
+-- Collect all inputs with items ready to deliver
+local function collectSupplies(network, surface)
+  local supplies = {}
+  
+  for _, inPort in pairs(network.inputs) do
+    local entity = inPort.entity
+    if not entity or not entity.valid then goto nextPort end
+    
+    -- Check for items ready on each input port lane
+    local canDrop = false
+    for idx = 1, 2 do
+      local lane = entity.get_transport_line(idx)
+      
+      -- If there's room to insert an item at the end of the lane, it's not full yet
+      if lane.can_insert_at(lane.line_length - 0.25) then
+        canDrop = true
+        goto nextLane
+      end
+      
+      -- [1] should be the last item on the lane
+      trackInput(network, supplies, inPort, lane[1], idx)
+      ::nextLane::
+    end
+    
+    if canDrop then
+      -- Check if there's an inserter waiting to drop here as well
+      local inserters = surface.find_entities_filtered{
+        position = entity.position, 
+        radius = INSERTER_SCAN_RADIUS, 
+        type = "inserter"
+      }
+      
+      for _, inserter in pairs(inserters) do
+        if inserter.drop_target == entity
+          and inserter.held_stack.count > 0
+          and Util.positionsEqual(inserter.held_stack_position, inserter.drop_position) then
+          trackInput(network, supplies, inPort, inserter.held_stack, nil, inserter)
+        end
+      end
+    end
+    
+    ::nextPort::
+  end
+  
+  return supplies
+end
+
+-- Distribute items from inputs to outputs
+local function distributeItems(network, supplies, recalcBufferLenghts)
   if recalcBufferLenghts then
-    storage.nextRecalcTick = game.tick + BUFFER_LENGTH_RECALC_TICKS
+    -- Reset the buffer lengths for each output so they'll update to the farthest recent input
+    for _, outPort in pairs(network.outputs) do
+      outPort.bufferLength = MIN_BUFFER_LENGTH
+    end
   end
 
-  for _, surface in pairs(game.surfaces) do
-    local network = Network.get(surface.name)
-    local supplies = {
-      -- [itemFilterKey] = { {port=port1, lane=1}, {port=port1, lane=2} }
-    }
+  -- Deliver each input item to the next output buffer in the round-robin list
+  for itemKey, inputs in pairs(supplies) do
+    local demands = network.demands[itemKey]
+    
+    Util.tableShuffle(inputs)
+    local lastSupplyIdx, inputEntry = next(inputs, nil)
+    if not lastSupplyIdx then goto nextItem end
 
-    -- Collect all inputs with items ready to deliver
-    for _, inPort in pairs(network.inputs) do
-      local entity = inPort.entity
-
-      -- Check for items ready on each input port lane
-      local canDrop = false
-      for idx = 1, 2 do
-        if not entity or not entity.valid then
-          goto laneLoop
-        end
-        local lane = entity.get_transport_line(idx)
-        
-        -- If there's room to insert an item at the end of the lane, it's not full yet
-        if lane.can_insert_at(lane.line_length - 0.25) then
-          canDrop = true
-          goto laneLoop
-        end
-        
-        -- [1] should be the last item on the lane
-        trackInput(network, supplies, inPort, lane[1], idx)
-        ::laneLoop::
+    for _ = 1, #demands do
+      if not demands[demands.lastIndex] then
+        demands.lastIndex = 1
       end
-      if canDrop then
-        -- Check if there's an inserter waiting to drop here as well
-        local inserters = surface.find_entities_filtered{position=entity.position, radius=INSERTER_SCAN_RADIUS, type="inserter"}
-        for _, inserter in pairs(inserters) do
-          if inserter.drop_target == entity
-            and inserter.held_stack.count > 0
-            and Util.positionsEqual(inserter.held_stack_position, inserter.drop_position) then
-            trackInput(network, supplies, inPort, inserter.held_stack, nil, inserter)
-          end
-        end
-      end
-    end
-
-    if recalcBufferLenghts then
-      -- Reset the buffer lengths for each output so they'll update to the farthest recent input
-      for _, outPort in pairs(network.outputs) do
-        outPort.bufferLength = MIN_BUFFER_LENGTH
-      end
-    end
-
-    -- Deliver each input item to the next output buffer in the round-robin list
-    for itemKey, inputs in pairs(supplies) do
-      local demands = network.demands[itemKey]
-
-      Util.tableShuffle(inputs)
-      local lastSupplyIdx, inputEntry = next(inputs, nil)
-      if not lastSupplyIdx then break end
-
-      for _ = 1, #demands do
-        if not demands[demands.lastIndex] then
-          demands.lastIndex = 1
-        end
-        local outputEntry = demands[demands.lastIndex]
-        local manhattanDistance = Util.manhattanDistance(inputEntry.port.entity.position, outputEntry.port.entity.position)
+      
+      local outputEntry = demands[demands.lastIndex]
+      if outputEntry and outputEntry.port then
+        local manhattanDistance = Util.manhattanDistance(
+          inputEntry.port.entity.position, 
+          outputEntry.port.entity.position
+        )
 
         -- Advance to the next output
         demands.lastIndex = demands.lastIndex + 1
@@ -142,25 +161,53 @@ function Network.tick()
 
           -- Advance to the next input
           lastSupplyIdx, inputEntry = next(inputs, lastSupplyIdx)
-          if not lastSupplyIdx then break end -- No more available
+          if not lastSupplyIdx then goto nextItem end -- No more available
         end
       end
     end
+    
+    ::nextItem::
+  end
+end
 
-    -- Push items into outputs from their buffers
-    for _, output in pairs(network.outputs) do
-      for idx = 1, 2 do
-        local lane = output.entity.get_transport_line(idx)
-        if lane.can_insert_at_back() then
-          local portLane = Network.getPortLane(output, idx)
-          local buffer = portLane.buffer
-          if buffer[1] and buffer[1].arriveTick <= game.tick then
-            lane.insert_at_back(buffer[1].inventory[1])
-            Network.removeItem(output, portLane, 1)
-          end
+-- Process output buffers and push items onto output belts
+local function processOutputBuffers(network)
+  for _, output in pairs(network.outputs) do
+    if not output.entity or not output.entity.valid then goto nextOutput end
+    
+    for idx = 1, 2 do
+      local lane = output.entity.get_transport_line(idx)
+      if lane.can_insert_at_back() then
+        local portLane = Network.getPortLane(output, idx)
+        local buffer = portLane.buffer
+        if buffer[1] and buffer[1].arriveTick <= game.tick then
+          lane.insert_at_back(buffer[1].inventory[1])
+          Network.removeItem(output, portLane, 1)
         end
       end
     end
+    
+    ::nextOutput::
+  end
+end
+
+function Network.tick()
+  local recalcBufferLenghts = not storage.nextRecalcTick or game.tick >= storage.nextRecalcTick
+  if recalcBufferLenghts then
+    storage.nextRecalcTick = game.tick + BUFFER_LENGTH_RECALC_TICKS
+  end
+
+  for _, surface in pairs(game.surfaces) do
+    local network = Network.get(surface.name)
+    
+    -- Step 1: Collect supplies from inputs
+    local supplies = collectSupplies(network, surface)
+    
+    -- Step 2: Distribute items to outputs
+    distributeItems(network, supplies, recalcBufferLenghts)
+    
+    -- Step 3: Process output buffers
+    processOutputBuffers(network)
   end
 end
 
@@ -181,21 +228,31 @@ end
 function Network.getPort(entity)
   if not Util.isPort(entity) then return nil end
   if Util.isGhost(entity) then
-    local tags = entity.tags or {}
     return {
-      entity=entity,
-      itemCounts={},
-      leftLane={item=tags[MOD_DATA_LEFT_LANE]},
-      rightLane={item=tags[MOD_DATA_RIGHT_LANE]},
+      entity = entity,
+      itemCounts = {},
+      leftLane = {},
+      rightLane = {},
     }
   end
   return Network.getPortGroup(entity)[entity.unit_number]
 end
 
-function Network.getPortLane(port, lane)
-  if lane == 1 then return port.leftLane
-  elseif lane == 2 then return port.rightLane end
-  return nil
+-- Creates a new port data structure
+function Network.createPort(entity, combinator)
+  return {
+    entity = entity,
+    combinator = combinator,
+    itemCounts = {},
+    leftLane = {
+      buffer = {},
+      bufferLength = MIN_BUFFER_LENGTH,
+    },
+    rightLane = {
+      buffer = {},
+      bufferLength = MIN_BUFFER_LENGTH,
+    },
+  }
 end
 
 -- Inserts an item into the given port and lane's buffer and updates the stack's count
@@ -208,7 +265,7 @@ function Network.insertItem(port, lane, itemStack, manhattanDistance)
   local outputSpeed = prototypes.entity[port.entity.name].belt_speed
 
   local entry = {
-    inventory=InventoryPool.checkout(),
+    inventory = InventoryPool.checkout(),
     arriveTick = game.tick + manhattanDistance / outputSpeed,
   }
   entry.inventory.insert(itemStack)
@@ -243,7 +300,7 @@ function updateItemCount(port, itemKey, itemCount)
   if not port.itemCounts then
     -- First time accessed we have to count everything in the buffer
     port.itemCounts = {}
-    function count(lane)
+    local function countLane(lane)
       for _, entry in ipairs(lane.buffer) do
         local item = entry.inventory[1]
         local key = Util.itemFilterToKey(item)
@@ -253,17 +310,19 @@ function updateItemCount(port, itemKey, itemCount)
         port.itemCounts[key] = port.itemCounts[key] + item.count
       end
     end
-    count(port.leftLane)
-    count(port.rightLane)
+    countLane(port.leftLane)
+    countLane(port.rightLane)
   else
     -- After that we can just increment the existing counts
-    if not port.itemCounts[itemKey] then
-      port.itemCounts[itemKey] = 0
-    end
-    port.itemCounts[itemKey] = port.itemCounts[itemKey] + itemCount
+    if itemKey then
+      if not port.itemCounts[itemKey] then
+        port.itemCounts[itemKey] = 0
+      end
+      port.itemCounts[itemKey] = port.itemCounts[itemKey] + itemCount
 
-    if port.itemCounts[itemKey] < 1 then
-      port.itemCounts[itemKey] = nil
+      if port.itemCounts[itemKey] < 1 then
+        port.itemCounts[itemKey] = nil
+      end
     end
   end
 end
@@ -273,32 +332,74 @@ function Network.getDemands(network, itemFilter)
   return network.demands[demandKey]
 end
 
+function Network.trackDemand(network, itemKey, port, lane)
+  if not network.demands[itemKey] then
+    network.demands[itemKey] = { lastIndex = 0 }
+  end
+  table.insert(network.demands[itemKey], { port = port, lane = lane })
+end
+
+function Network.removeDemand(network, itemKey, port, lane)
+  local demands = network.demands[itemKey]
+  if demands then
+    Util.tableRemove(demands, function(entry)
+      return entry.port == port and entry.lane == lane
+    end)
+    if #demands == 0 then
+      network.demands[itemKey] = nil
+    end
+  end
+end
+
 function Network.updateDemands(network, port, laneIndex, newItemFilter)
   local oldItemFilter = Network.getPortLane(port, laneIndex).item
   if Util.itemFiltersEqual(oldItemFilter, newItemFilter) then return end
+  
   if oldItemFilter then
     -- Remove the old demand
     local oldDemandKey = Util.itemFilterToKey(oldItemFilter)
-    local oldItemDemands = network.demands[oldDemandKey]
-    if oldItemDemands then
-      Util.tableRemove(oldItemDemands, function (entry)
-        return entry.port == port and entry.lane == laneIndex
-      end)
-      if #oldItemDemands == 0 then
-        -- Clean up the demand array if now empty
-        network.demands[oldDemandKey] = nil
-      end
-    end
+    Network.removeDemand(network, oldDemandKey, port, laneIndex)
   end
+  
   if newItemFilter then
     -- Add the new demand
     local newDemandKey = Util.itemFilterToKey(newItemFilter)
-    local mewItemDemands = network.demands[newDemandKey]
-    if not mewItemDemands then
-      mewItemDemands = { lastIndex=0 } -- Track the last output index for round-robin delivery
-      network.demands[newDemandKey] = mewItemDemands
+    Network.trackDemand(network, newDemandKey, port, laneIndex)
+  end
+end
+
+-- Gets or creates a combinator for the port
+local function getOrCreateCombinator(entity)
+  return entity.surface.find_entity(COMBINATOR_TYPE, entity.position) or 
+         entity.surface.create_entity{
+           name = COMBINATOR_TYPE,
+           position = entity.position,
+           force = entity.force,
+           create_build_effect_smoke = false,
+           raise_built = false
+         }
+end
+
+-- Handle port upgrade scenarios
+local function handlePortUpgrade(entity, priorEntity, combinator)
+  local isSameDirection = priorEntity and Util.isInput(entity) == Util.isInput(priorEntity)
+  local priorGroup = priorEntity and Network.getPortGroup(priorEntity)
+  local port = priorGroup and priorGroup[priorEntity.unit_number]
+  
+  if priorEntity and isSameDirection and port then
+    -- For in-place upgrade, preserve the prior port's settings and buffers
+    port.entity = entity
+    port.combinator = combinator
+    priorGroup[priorEntity.unit_number] = nil
+    AnimationTracker.teardown(priorEntity)
+    return port
+  else
+    -- Create a new port
+    if priorEntity then
+      -- Remove the old port if upgrading with a different direction
+      Network.removePort(priorEntity)
     end
-    table.insert(mewItemDemands, { port=port, lane=laneIndex })
+    return Network.createPort(entity, combinator)
   end
 end
 
@@ -309,58 +410,125 @@ function Network.addPort(entity, priorEntity)
   if Util.isGhost(entity) then return end
 
   local priorIsGhost = priorEntity and Util.isGhost(priorEntity)
-  local upgradeInPlace = not not priorEntity
-  local isSameDirection = upgradeInPlace and Util.isInput(entity) == Util.isInput(priorEntity)
-  local priorGroup = priorEntity and Network.getPortGroup(priorEntity)
-  local port = priorGroup and priorGroup[priorEntity.unit_number]
-  if upgradeInPlace and isSameDirection and port then
-    -- For in-place upgrade, preserve the prior port's settings and buffers but replace the port entity
-    port.entity = entity
-    priorGroup[priorEntity.unit_number] = nil
-  else
-    -- For new ports, create an empty model
-    port = {
-      entity = entity,
-      itemCounts = {},
-      leftLane = {
-        item = nil,
-        buffer = {},
-        bufferLength = MIN_BUFFER_LENGTH,
-      },
-      rightLane = {
-        item = nil,
-        buffer = {},
-        bufferLength = MIN_BUFFER_LENGTH,
-      },
-    }
-    if upgradeInPlace then
-      -- If the new port direction doesn't match the prior one, remove the old port
-      Network.removePort(priorEntity)
-    end
-  end
-  Network.getPortGroup(entity)[entity.unit_number] = port
+  local network = Network.get(entity.surface.name)
+  local portGroup = Network.getPortGroup(entity)
+  local combinator = getOrCreateCombinator(entity)
+  
+  -- Handle upgrades or new ports
+  local port = handlePortUpgrade(entity, priorEntity, combinator)
+  portGroup[entity.unit_number] = port
 
   if priorIsGhost and priorEntity.tags then
     Network.importSettings(entity, priorEntity.tags)
   end
+  
   AnimationTracker.setup(entity)
+  log("Added port: " .. entity.name .. " with unit_number " .. entity.unit_number .. " on surface " .. entity.surface.name)
+end
 
-  log("Added: "..entity.name..", "..entity.surface.name)
+-- Helper function to set combinator signals based on item settings
+function Network.setSettings(port, settings)
+  if not port.combinator or not port.combinator.valid then return end
+  local control = port.combinator.get_or_create_control_behavior()
+  if control then
+    local section1 = control.get_section(1) or control.add_section()
+    local section2 = control.get_section(2) or control.add_section()
+    if settings[MOD_DATA_LEFT_LANE] and settings[MOD_DATA_LEFT_LANE].name then
+      section1.set_slot(1, {
+        value = {
+          type = "item",
+          name = settings[MOD_DATA_LEFT_LANE].name,
+          quality = settings[MOD_DATA_LEFT_LANE].quality or "normal"
+        },
+        min = 1
+      })
+    else
+      section1.clear_slot(1)
+    end
+    if settings[MOD_DATA_RIGHT_LANE] and settings[MOD_DATA_RIGHT_LANE].name then
+      section2.set_slot(1, {
+        value = {
+          type = "item",
+          name = settings[MOD_DATA_RIGHT_LANE].name,
+          quality = settings[MOD_DATA_RIGHT_LANE].quality or "normal"
+        },
+        min = 1
+      })
+    else
+      section2.clear_slot(1)
+    end
+  end
+end
+
+function Network.getSettings(port)
+  if Util.isGhost(port.entity) then
+    return port.entity.tags or {}
+  end
+
+  if not port.combinator or not port.combinator.valid then return end
+  local control = port.combinator.get_or_create_control_behavior()
+  if not control then return end
+  local section1 = control.get_section(1)
+  local section2 = control.get_section(2)
+  local leftSlot = section1 and section1.get_slot(1)
+  local rightSlot = section2 and section2.get_slot(1)
+  return {
+    [MOD_DATA_LEFT_LANE] = leftSlot and leftSlot.value,
+    [MOD_DATA_RIGHT_LANE] = rightSlot and rightSlot.value
+  }
+end
+
+function Network.tryGetCombinatorSettings(entity)
+  if not entity or not entity.valid then return end
+  if entity.ghost_name ~= COMBINATOR_TYPE then return end
+  local control = entity.get_or_create_control_behavior()
+  if not control then return end
+  local section1 = control.get_section(1)
+  local section2 = control.get_section(2)
+  if not section1 or not section2 then return end
+  local leftSlot = section1.get_slot(1)
+  local rightSlot = section2.get_slot(1)
+  return {
+    [MOD_DATA_LEFT_LANE] = leftSlot and leftSlot.value,
+    [MOD_DATA_RIGHT_LANE] = rightSlot and rightSlot.value
+  }
 end
 
 function Network.configurePort(entity, leftLane, rightLane)
   if not entity or not entity.valid then return end
+  local settings = createSettings(leftLane, rightLane)
+  entity.tags = settings
 
-  if Util.isGhost(entity) then
-    entity.tags = createSettings(leftLane, rightLane)
-  else
-  local network = Network.get(entity.surface.name)
-  local port = Network.getPort(entity)
+  if not Util.isGhost(entity) then
+    local network = Network.get(entity.surface.name)
+    local port = Network.getPort(entity)
+    port.tags = settings
 
-  Network.updateDemands(network, port, 1, leftLane)
-  Network.updateDemands(network, port, 2, rightLane)
-  port.leftLane.item = leftLane
-  port.rightLane.item = rightLane
+    Network.updateDemands(network, port, 1, leftLane)
+    Network.updateDemands(network, port, 2, rightLane)
+    
+    -- Update combinator signals
+    if port.combinator and port.combinator.valid then
+      Network.setSettings(port, settings)
+    end
+  end
+end
+
+-- Spill lane items onto the ground or to the provided inventory
+local function spillLaneItems(entity, lane, spillInventory)
+  for _, slot in pairs(lane.buffer) do
+    if spillInventory then
+      -- Insert into the given inventory
+      spillInventory.insert(slot.inventory[1])
+    else
+      -- Otherwise, spill onto the ground around the port
+      entity.surface.spill_item_stack{
+        position = entity.position,
+        stack = slot.inventory[1],
+        allow_belts = false,
+      }
+    end
+    InventoryPool.checkin(slot.inventory)
   end
 end
 
@@ -371,41 +539,23 @@ function Network.removePort(entity, spillInventory)
   local network = Network.get(entity.surface.name)
   local portGroup = Network.getPortGroup(entity)
   local port = portGroup[entity.unit_number]
+  if not port then return end
 
   Network.updateDemands(network, port, 1, nil)
   Network.updateDemands(network, port, 2, nil)
+  
+  -- Destroy combinator when removing port
+  if port.combinator and port.combinator.valid then
+    port.combinator.destroy()
+  end
+  
   portGroup[entity.unit_number] = nil
 
-  function spill(lane)
-    for _, slot in pairs(lane.buffer) do
-      if spillInventory then
-        -- Insert into the given inventory
-        spillInventory.insert(slot.inventory[1])
-      else
-        -- Otherwise, spill onto the ground around the port
-        entity.surface.spill_item_stack{
-          position=entity.position,
-          stack=slot.inventory[1],
-          allow_belts=false,
-        }
-      end
-      InventoryPool.checkin(slot.inventory)
-    end
-  end
-  spill(port.leftLane)
-  spill(port.rightLane)
+  spillLaneItems(entity, port.leftLane, spillInventory)
+  spillLaneItems(entity, port.rightLane, spillInventory)
+  
   AnimationTracker.teardown(entity)
   log("Removed: "..entity.name..", "..entity.surface.name)
-end
-
--- Returns configuration settings for the given entity in a tags-compatible table
-function Network.exportSettings(entity)
-  if Util.isGhost(entity) then
-    return entity.tags or {}
-  else
-    local port = Network.getPort(entity)
-    return createSettings(port.leftLane.item, port.rightLane.item)
-  end
 end
 
 function createSettings(leftItem, rightItem)
@@ -420,7 +570,10 @@ function Network.importSettings(entity, tags)
   if Util.isGhost(entity) then
     entity.tags = tags
   else
-  Network.configurePort(entity, tags[MOD_DATA_LEFT_LANE], tags[MOD_DATA_RIGHT_LANE])
+    local leftItem = tags[MOD_DATA_LEFT_LANE]
+    local rightItem = tags[MOD_DATA_RIGHT_LANE]
+    
+    Network.configurePort(entity, leftItem, rightItem)
   end
 end
 
